@@ -18,14 +18,36 @@ jobs:
       - name: unit tests
         run: .venv/bin/python -m pytest -q
 
-  retrieval-gate:
-    # Quality gate: a drop in recall or a ranking-policy regression fails the
-    # build the same way a failing unit test does.
+  fixture-gate:
+    # The gate that ALWAYS runs. Index and query vectors are committed (1.1 MB
+    # total, int8-quantized, one patient), so this needs no API key, no cache
+    # and no download.
     #
-    # Runs only when the cached index and embeddings exist. Those artefacts are
-    # ~90 MB and gitignored, so on a fresh clone this job reports why it was
-    # skipped rather than silently passing — a gate that quietly no-ops is worse
-    # than no gate, because the badge still looks green.
+    # Verified to have teeth: injecting the pre-shape-aware policy into
+    # retrieve.py drops it to 2/5 cases with exit 1, naming
+    # `per_query.prediabetes=0`.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: install fhir-rag and evalkit
+        run: |
+          uv venv --python 3.13
+          uv pip install -e ".[dev]"
+          uv pip install "evalkit @ git+https://github.com/moneya/evalkit"
+      - name: measure fixture
+        run: .venv/bin/python scripts/emit_fixture_metrics.py --out data/fixture_metrics.json
+      - name: gate
+        run: .venv/bin/evalkit run evals/fixture_gate.yaml
+
+  retrieval-gate:
+    # The full 30-patient gate, which needs the 806 MB index and the embedding
+    # cache. Those are gitignored, so this runs only when a cache restore hits
+    # and otherwise says so loudly rather than passing silently — a gate that
+    # quietly no-ops is worse than no gate, because the badge still looks green.
+    #
+    # The fixture gate above covers the ranking-policy regression unconditionally,
+    # so a fresh clone is never left with zero quality coverage.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

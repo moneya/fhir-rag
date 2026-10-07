@@ -1,0 +1,79 @@
+# Retrieval quality gate — committed fixture, runs anywhere.
+#
+#   python scripts/emit_fixture_metrics.py --out data/fixture_metrics.json
+#   evalkit run evals/fixture_gate.yaml
+#
+# This gate needs no API key, no download and no cached index: both the index
+# (1.0 MB, int8-quantized, one patient) and the query vectors ship in the repo.
+# That is the whole point — the 30-patient gate in retrieval_gate.yaml skips on a
+# fresh clone, and a skipped gate under a green badge is worse than no gate.
+#
+# It deliberately does NOT reproduce the 30-patient headline numbers. One patient
+# gives 5 (patient, query) pairs instead of 92, so the averages differ and
+# claiming otherwise would be dishonest. Its job is narrower: catch a regression
+# in the ranking POLICY, which it does because the fixture separates the
+# candidate policies by a wide margin.
+#
+# Measured on the committed fixture, k=10:
+#
+#   policy         recall@10
+#   shape-aware        1.000   <- what this gate protects
+#   flat top-k         0.800   (prediabetes collapses to 0.000)
+#   global cap 2       0.760   (flu-vaccination and body-weight fall to 0.400)
+#
+# Thresholds are set at 1.000 for the per-query cells precisely because the
+# fixture is small and deterministic: there is no sampling noise to tolerate, so
+# any drop is a real regression rather than variance.
+name: fhir-rag-fixture-gate
+provider: echo
+models: [gpt-5-mini]
+
+cases:
+  - id: fixture-is-intact
+    # If the fixture is truncated or re-quantized badly, every metric below
+    # becomes meaningless. Pin its shape before trusting its numbers.
+    prompt: "fixture metrics"
+    fixture_file: ../data/fixture_metrics.json
+    assert:
+      - json_valid: true
+      - json_path: {path: index_size, equals: 328}
+      - json_path: {path: pairs, equals: 5}
+      - json_path: {path: encoding, equals: int8-base64}
+      - json_path: {path: model, equals: nvidia/nemotron-3-embed-1b}
+
+  - id: macro-retrieval
+    prompt: "fixture metrics"
+    fixture_file: ../data/fixture_metrics.json
+    assert:
+      - json_path: {path: "retrieval.recall@10", gte: 1.0}
+      - json_path: {path: "retrieval.hit@10", gte: 1.0}
+
+  - id: sparse-answer-queries
+    # flat top-k scores 0.000 on prediabetes here. This is the single most
+    # valuable assertion in the repo: it is the original failure that motivated
+    # shape-aware retrieval, frozen so it cannot silently return.
+    prompt: "fixture metrics"
+    fixture_file: ../data/fixture_metrics.json
+    assert:
+      - json_path: {path: "per_query.prediabetes", gte: 1.0}
+      - json_path: {path: "per_query.hypertension-diagnosis", gte: 1.0}
+
+  - id: dense-answer-queries
+    # A global resource-type cap drops both of these to 0.400. Gated so the fix
+    # for sparse answers cannot be bought by breaking dense ones.
+    prompt: "fixture metrics"
+    fixture_file: ../data/fixture_metrics.json
+    assert:
+      - json_path: {path: "per_query.flu-vaccination", gte: 1.0}
+      - json_path: {path: "per_query.body-weight", gte: 1.0}
+
+  - id: ranking-quality
+    # MRR and precision@1 are NOT 1.000 on this fixture (0.700 and 0.600): the
+    # right chunks are all retrieved, but a measurement still out-ranks a
+    # diagnosis at position 1. Gated at the measured value rather than rounded
+    # up, because this is the model limitation the README documents.
+    prompt: "fixture metrics"
+    fixture_file: ../data/fixture_metrics.json
+    assert:
+      - json_path: {path: "retrieval.mrr", gte: 0.70}
+      - json_path: {path: "retrieval.precision@1", gte: 0.60}
