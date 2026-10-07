@@ -155,6 +155,75 @@ That reaches 0.898 recall@10 — above every single strategy, because each query
 gets the better of the two. The trade-off is explicit in the data model instead
 of hidden inside an average.
 
+## Does the hosted embedding model earn its dependency?
+
+Every number above came from `nvidia/nemotron-3-embed-1b` — 2048 dims, hosted,
+requires a key, and the reason the full CI gate cannot run without one. So the
+dependency was tested rather than assumed, against `embeddinggemma:300m` running
+locally through Ollama: 621 MB, 768 dims, no key, no network egress.
+
+Same 30 patients, same 17,472 chunks, same code-derived ground truth, same
+`retrieve()` path, same k. Only the vectors differ.
+
+| metric | nemotron (2048d, hosted) | embeddinggemma (768d, local) |
+|---|---|---|
+| recall@10 | 0.8978 | 0.8986 |
+| hit@10 | 0.9565 | 1.0000 |
+| MRR | 0.8127 | 0.8642 |
+| precision@1 | 0.7500 | 0.7717 |
+| throughput | 61 chunks/s (API, 8-way) | 97 chunks/s (local) |
+
+The local model appears to win every metric. **It does not.** A paired
+permutation test over the 92 (patient, query) pairs gives **p = 0.971**:
+
+```
+mean difference (gemma - nemotron): +0.0007
+pairs where they differ at all:     22 of 92
+  gemma better: 5
+  gemma worse:  17
+```
+
+Gemma is worse on more than three times as many pairs as it is better on; the mean
+tilts positive only because its few wins are larger. **The defensible claim is
+parity on recall, not a win.**
+
+Two further cautions kept in rather than dropped:
+
+* `kidney-problems` shows a terrifying −0.500 per-query delta. It has **one**
+  patient with ground truth. A single query cannot be read as a trend, so it is
+  reported and excluded, not averaged in silently. Removing both thin cells
+  (≤3 patients) leaves the direction unchanged: 0.9008 vs 0.9077.
+* nemotron is **asymmetric** (separate query/passage encoding), EmbeddingGemma is
+  **symmetric**. That asymmetry was the original reason for choosing nemotron, so
+  this is not a single-variable comparison.
+
+The useful conclusion is not "model X beats model Y". It is that on this task, a
+768-dim model that runs on a laptop is **statistically indistinguishable** from a
+2048-dim hosted one — so the key, the egress and the CI dependency are buying
+convenience, not quality.
+
+## Storage: cut bits before dimensions
+
+The committed fixture is int8. The obvious next step for shrinking it is fewer
+dimensions, and that instinct is wrong. Measured on the same vectors and ground
+truth, at a **matched 256 bytes/vector** budget:
+
+| encoding | dims | bytes/vector | recall@10 | MRR |
+|---|---|---|---|---|
+| int8, full dims | 2048 | 2048 | 1.000 | 0.700 |
+| **1-bit, full dims** | 2048 | **256** | **1.000** | 0.695 |
+| float32, truncated | 64 | 256 | **0.440** | 0.465 |
+| int8, half dims | 1024 | 1024 | 1.000 | 0.700 |
+
+Dropping to **one bit per dimension costs essentially nothing** (recall identical,
+MRR −0.005) at 1/8 the bytes. Spending the same budget on fewer dimensions
+**halves recall**. This reproduces the direction Qdrant reports for TurboQuant,
+with a wider margin on this corpus.
+
+Caveat: nemotron is not documented as Matryoshka-trained, so naive truncation is
+probably unfairly weak for it. EmbeddingGemma is Matryoshka-trained and would be
+the fairer test of the truncation leg.
+
 ## Reranking
 
 No reranker model is callable on this NVIDIA account — every `nv-rerankqa` id

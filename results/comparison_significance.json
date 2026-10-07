@@ -1,0 +1,10 @@
+{
+  "pairs": 92,
+  "mean_difference": 0.0007,
+  "pairs_differing": 22,
+  "gemma_better": 5,
+  "gemma_worse": 17,
+  "permutation_p": 0.9707,
+  "trials": 20000,
+  "conclusion": "parity"
+}

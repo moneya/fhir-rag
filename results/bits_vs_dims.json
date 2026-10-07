@@ -1,0 +1,43 @@
+{
+  "chunks": 328,
+  "dims": 2048,
+  "one_bit_bytes_per_vector": 256.0,
+  "results": [
+    {
+      "encoding": "int8 full dims",
+      "dims": 2048,
+      "bytes_per_vector": 2048.0,
+      "recall@10": 1.0,
+      "mrr": 0.7,
+      "precision@1": 0.6,
+      "pairs": 5
+    },
+    {
+      "encoding": "1-bit full dims",
+      "dims": 2048,
+      "bytes_per_vector": 256.0,
+      "recall@10": 1.0,
+      "mrr": 0.6952,
+      "precision@1": 0.6,
+      "pairs": 5
+    },
+    {
+      "encoding": "float32 64 dims",
+      "dims": 64,
+      "bytes_per_vector": 256.0,
+      "recall@10": 0.44,
+      "mrr": 0.465,
+      "precision@1": 0.4,
+      "pairs": 5
+    },
+    {
+      "encoding": "int8 1024 dims",
+      "dims": 1024,
+      "bytes_per_vector": 1024.0,
+      "recall@10": 1.0,
+      "mrr": 0.7,
+      "precision@1": 0.6,
+      "pairs": 5
+    }
+  ]
+}

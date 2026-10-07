@@ -1,0 +1,51 @@
+{
+  "corpus": {
+    "chunks": 17472,
+    "k": 10
+  },
+  "baseline": {
+    "label": "nemotron-3-embed-1b (hosted, asymmetric)",
+    "model": "nvidia/nemotron-3-embed-1b",
+    "dims": 2048,
+    "patients": 30,
+    "pairs": 92,
+    "recall@10": 0.8978,
+    "hit@10": 0.9565,
+    "mrr": 0.8127,
+    "precision@1": 0.75,
+    "per_query": {
+      "blood-sugar-labs": 0.5515,
+      "body-weight": 0.885,
+      "diabetes-medication": 0.5263,
+      "flu-vaccination": 1.0,
+      "hba1c-results": 0.8893,
+      "hypertension-diagnosis": 0.875,
+      "kidney-problems": 1.0,
+      "prediabetes": 1.0
+    }
+  },
+  "candidate": {
+    "label": "embeddinggemma:300m (local, symmetric)",
+    "model": "embeddinggemma:300m",
+    "dims": 768,
+    "patients": 30,
+    "pairs": 92,
+    "recall@10": 0.8986,
+    "hit@10": 1.0,
+    "mrr": 0.8642,
+    "precision@1": 0.7717,
+    "per_query": {
+      "blood-sugar-labs": 0.7204,
+      "body-weight": 0.8648,
+      "diabetes-medication": 0.4737,
+      "flu-vaccination": 0.9663,
+      "hba1c-results": 0.8746,
+      "hypertension-diagnosis": 1.0,
+      "kidney-problems": 0.5,
+      "prediabetes": 1.0
+    },
+    "embed_seconds": 179.6,
+    "chunks_per_second": 97.3
+  },
+  "confound": "nemotron is asymmetric (separate query/passage encoding), EmbeddingGemma is symmetric. Not a single-variable comparison."
+}
