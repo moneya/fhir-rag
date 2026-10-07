@@ -1,0 +1,89 @@
+# Retrieval quality gate.
+#
+#   python scripts/emit_metrics.py --patients 30 --out data/metrics.json
+#   evalkit run evals/retrieval_gate.yaml
+#
+# The suite reads metrics that are already computed, so it makes no API calls
+# and costs nothing. `fixture` feeds the measured JSON straight to the
+# assertions; the `echo` provider exists for exactly this.
+#
+# Thresholds sit a little below the measured values, not at them. A gate pinned
+# to the exact current number fails on noise and gets disabled within a week,
+# which is worse than no gate. These catch a real regression — a worse embedding
+# model, a broken chunker, a ranking policy change — while tolerating the
+# ±0.01 that re-indexing can move.
+#
+# Measured on 2026-10-07, 30 patients, 92 (patient, query) pairs,
+# nvidia/nemotron-3-embed-1b:
+#
+#   recall@10   0.898     gate >= 0.85
+#   hit@10      0.957     gate >= 0.92
+#   MRR         0.813     gate >= 0.75
+#   precision@1 0.750     gate >= 0.70
+name: fhir-rag-retrieval-gate
+provider: echo
+models: [gpt-5-mini]
+
+cases:
+  - id: corpus-is-the-expected-size
+    # A silently truncated index would make every metric below meaningless:
+    # recall over three patients is easy and tells you nothing.
+    prompt: "retrieval metrics"
+    fixture_file: ../data/metrics.json
+    assert:
+      - json_valid: true
+      - json_path: {path: index_size, gte: 17000}
+      - json_path: {path: pairs, gte: 90}
+      - json_path: {path: model, equals: nvidia/nemotron-3-embed-1b}
+
+  - id: recall-at-10
+    prompt: "retrieval metrics"
+    fixture_file: ../data/metrics.json
+    assert:
+      - json_path: {path: "retrieval.recall@10", gte: 0.85}
+
+  - id: hit-rate-at-10
+    # Hit-rate is the "did RAG work at all" number: at least one relevant chunk
+    # reached the context. It should stay close to 1.0 even when recall dips.
+    prompt: "retrieval metrics"
+    fixture_file: ../data/metrics.json
+    assert:
+      - json_path: {path: "retrieval.hit@10", gte: 0.92}
+
+  - id: ranking-quality
+    # MRR and precision@1 guard the half a user actually reads. Recall can hold
+    # steady while ordering rots, so these are gated separately.
+    prompt: "retrieval metrics"
+    fixture_file: ../data/metrics.json
+    assert:
+      - json_path: {path: "retrieval.mrr", gte: 0.75}
+      - json_path: {path: "retrieval.precision@1", gte: 0.70}
+
+  - id: sparse-answer-queries
+    # These two were 0.000 and 0.125 before shape-aware ranking. They are the
+    # regression this project most needs to catch: a global diversification
+    # policy would quietly take them back to zero while macro recall still
+    # looked respectable.
+    prompt: "retrieval metrics"
+    fixture_file: ../data/metrics.json
+    assert:
+      - json_path: {path: "per_query.prediabetes", gte: 0.90}
+      - json_path: {path: "per_query.hypertension-diagnosis", gte: 0.80}
+
+  - id: dense-answer-queries
+    # The opposite failure: capping resource types globally would drop
+    # flu-vaccination from 1.000 to 0.332. Gated so neither half can be
+    # sacrificed for the other.
+    prompt: "retrieval metrics"
+    fixture_file: ../data/metrics.json
+    assert:
+      - json_path: {path: "per_query.flu-vaccination", gte: 0.90}
+      - json_path: {path: "per_query.body-weight", gte: 0.80}
+
+  - id: metrics-came-from-cache
+    # If CI starts missing the embedding cache it is silently making paid API
+    # calls on every push. That is a cost regression, which is this tool's job.
+    prompt: "retrieval metrics"
+    fixture_file: ../data/metrics.json
+    assert:
+      - json_path: {path: "cache.misses", lte: 0}

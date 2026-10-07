@@ -265,6 +265,60 @@ answer" to "unsourced", counted for review rather than scored as an error.
 certify that the conclusion is correct. Conflating provenance with correctness is
 how RAG systems get oversold.
 
+## CI gate
+
+Retrieval quality is gated the same way a unit test is, using
+[evalkit](https://github.com/moneya/evalkit):
+
+```bash
+python scripts/emit_metrics.py --patients 30 --out data/metrics.json
+evalkit run evals/retrieval_gate.yaml
+```
+
+Measurement and policy are deliberately separate. `emit_metrics.py` knows how to
+compute recall and nothing about what is acceptable; the thresholds live in
+`evals/retrieval_gate.yaml`, so moving a bar is a config change visible in a PR
+rather than an edit buried in Python.
+
+**It runs with no API key and no cost** — 92 cache hits, 0 misses. One gate case
+asserts `cache.misses <= 0`, because a CI job silently missing the cache is
+making paid API calls on every push, which is a cost regression.
+
+Thresholds sit below the measured values rather than at them. A gate pinned to
+the exact current number fails on noise and gets disabled within a week, which is
+worse than no gate:
+
+| Metric | Measured | Gate |
+|---|---|---|
+| recall@10 | 0.898 | ≥ 0.85 |
+| hit@10 | 0.957 | ≥ 0.92 |
+| MRR | 0.813 | ≥ 0.75 |
+| precision@1 | 0.750 | ≥ 0.70 |
+
+The two most valuable cases guard against opposite regressions, because a single
+macro number hides both:
+
+- `sparse-answer-queries` — prediabetes and hypertension, which were 0.000 and
+  0.125 before shape-aware ranking. A global diversification policy would take
+  them back to zero while macro recall still looked respectable.
+- `dense-answer-queries` — flu-vaccination and body-weight, which a global
+  resource-type cap would drop from 1.000 to 0.332.
+
+### Verified to fail, not just to pass
+
+A gate that only ever passes is decorative. With a regression injected into the
+metrics file:
+
+```
+FAIL  recall-at-10
+      json_path: retrieval.recall@10=0.61, want >= 0.85
+FAIL  sparse-answer-queries
+      json_path: per_query.prediabetes=0, want >= 0.9
+
+cases 5/7 passed
+exit code 1
+```
+
 ## Install
 
 ```bash
