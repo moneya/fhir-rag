@@ -205,6 +205,66 @@ partial list. Verified against the live API: an unreachable host and a real HTTP
 unreranked" is acceptable; retrieval returning nothing because an LLM had an off
 day is not.
 
+## Generation
+
+Retrieval without generation is a search box; generation without grounding is a
+liability. Answers are produced from retrieved records only, via Groq
+`qwen/qwen3.8-27b` (~0.6s, ~36 output tokens).
+
+5 patients, k=5, reranked retrieval, 17 answers, 0 transport errors:
+
+| Measure | Value |
+|---|---|
+| citation precision | 0.846 |
+| citation recall | 0.523 |
+| grounded | 0.941 |
+| hallucinated record ids | **0** |
+| mean latency | 0.58 s |
+| mean output tokens | 36 |
+
+**Control arm — abstained 5/5.** Each question was also asked against another
+patient's unrelated immunisation records, where refusing is the only correct
+answer. It refused every time. Without that arm, a model that always answers
+would score well on everything above.
+
+Abstention also survives near-miss distractors: asked for a *blood* glucose value
+when only a *urine* glucose record was present, it returned `INSUFFICIENT
+EVIDENCE` rather than conflating the two. Asked whether a patient had severe
+depression, it read a PHQ-9 score of 2 and said no.
+
+### Citations are verified, never trusted
+
+The model cites records as `[n]`; those ids are then checked in code against the
+context that was actually sent. Out-of-range ids are stripped into
+`invalid_citations` rather than silently accepted. A plausible answer citing
+record [7] when six were supplied is the most dangerous output a clinical RAG
+system can produce, because it looks sourced. Zero occurred in this run, but the
+check is what makes that claim meaningful.
+
+An empty context never reaches the model at all — a model asked a clinical
+question with no records answers from training data, which is precisely what
+grounding exists to prevent.
+
+### The most interesting failure
+
+One answer was flagged as **unsourced**: retrieval missed the patient's
+`Prediabetes` diagnosis, and the model answered anyway. Inspecting it (see
+`scripts/repro_false_answer.py`) showed this:
+
+> Yes, there is an indication of impaired glucose regulation. The patient's
+> Hemoglobin A1c levels were 5.82% [1] and 6.03% [2], both of which fall within
+> the range typically associated with prediabetes.
+
+The patient **does** have a Prediabetes diagnosis, and 6.03% **is** the
+prediabetic range (5.7–6.4%). The model reached a clinically correct conclusion
+from valid evidence the ground-truth rule did not designate.
+
+So the metric was wrong, not the model — and the label was changed from "false
+answer" to "unsourced", counted for review rather than scored as an error.
+`grounded` certifies that cited records exist and were supplied; it does **not**
+certify that the conclusion is correct. Conflating provenance with correctness is
+how RAG systems get oversold.
+
 ## Install
 
 ```bash
@@ -269,6 +329,8 @@ python scripts/bench_diversify.py          # the five ranking policies
 python scripts/diagnose_failures.py        # why a query scored 0.000
 python scripts/bench_rerank.py 10          # rerank vs not: recall, hit, MRR
 python scripts/bench_rerank_precision.py 10  # rerank vs not: precision@1/3/5
+python scripts/bench_generate.py 5           # citations, abstention, control arm
+python scripts/repro_false_answer.py         # the one unsourced answer, in full
 ```
 
 Both reuse the on-disk embedding cache, so re-running costs nothing.
