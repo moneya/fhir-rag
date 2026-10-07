@@ -19,6 +19,8 @@ inside an average.
 
 from __future__ import annotations
 
+from typing import Any
+
 from .diversify import cap_per_resource_type
 from .index import Hit, VectorIndex
 
@@ -35,15 +37,35 @@ def retrieve(
     resource_types: tuple[str, ...] | None = None,
     shape: str = "list",
     cap: int = 2,
+    reranker: Any | None = None,
+    question: str | None = None,
 ) -> list[Hit]:
-    """Top-k hits, re-ranked according to the expected answer shape."""
+    """Top-k hits, re-ranked according to the expected answer shape.
+
+    With a `reranker`, candidates are over-fetched for BOTH shapes and reordered
+    by the model before truncation — reranking only helps if it can see more
+    candidates than the final k. `question` is required then, since the reranker
+    scores text against the question rather than against the query vector.
+    """
     if shape not in ("single", "list"):
         raise ValueError(f"shape must be 'single' or 'list', got {shape!r}")
+    if reranker is not None and not question:
+        raise ValueError("reranker needs the question text, not just its vector")
 
-    fetch = k * OVERFETCH if shape == "single" else k
+    overfetch = shape == "single" or reranker is not None
+    fetch = k * OVERFETCH if overfetch else k
     hits = index.search(
         query_vector, k=fetch, patient_id=patient_id, resource_types=resource_types
     )
+
+    if reranker is not None:
+        outcome = reranker.rerank(question, hits, k=k)
+        hits = outcome.hits
+        # A fallback is not an error: embedding order is still a valid ranking.
+        if shape == "single":
+            return cap_per_resource_type(hits, k=k, cap=cap)
+        return hits[:k]
+
     if shape == "single":
         return cap_per_resource_type(hits, k=k, cap=cap)
     return hits[:k]
