@@ -20,3 +20,10 @@ dev = [
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fhir_rag"]
+
+[tool.pytest.ini_options]
+# Collect ONLY tests/. Without this, pytest walks scripts/ too and imports any
+# file whose name starts with test_ — benchmark scripts import evalkit and talk
+# to local services at module level, so collection alone failed CI while the
+# real suite passed. Scripts are run deliberately, never collected.
+testpaths = ["tests"]
