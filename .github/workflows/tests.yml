@@ -1,0 +1,63 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - name: install
+        run: |
+          uv venv --python 3.13
+          uv pip install -e ".[dev]"
+      - name: unit tests
+        run: .venv/bin/python -m pytest -q
+
+  retrieval-gate:
+    # Quality gate: a drop in recall or a ranking-policy regression fails the
+    # build the same way a failing unit test does.
+    #
+    # Runs only when the cached index and embeddings exist. Those artefacts are
+    # ~90 MB and gitignored, so on a fresh clone this job reports why it was
+    # skipped rather than silently passing — a gate that quietly no-ops is worse
+    # than no gate, because the badge still looks green.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+
+      - name: install fhir-rag and evalkit
+        run: |
+          uv venv --python 3.13
+          uv pip install -e ".[dev]"
+          uv pip install "evalkit @ git+https://github.com/moneya/evalkit"
+
+      - name: restore embedding cache
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            .cache/embeddings
+            data/index_30.json
+          key: fhir-rag-index-v1
+
+      - name: measure retrieval
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: .venv/bin/python scripts/emit_metrics.py --patients 30 --out data/metrics.json
+
+      - name: gate
+        if: steps.cache.outputs.cache-hit == 'true'
+        run: .venv/bin/evalkit run evals/retrieval_gate.yaml
+
+      - name: report skip
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          echo "::warning::Retrieval gate SKIPPED - no cached index."
+          echo "Seed it once with:"
+          echo "  python scripts/emit_metrics.py --patients 30 --out data/metrics.json"
+          echo "then upload .cache/embeddings and data/index_30.json to the cache key."
