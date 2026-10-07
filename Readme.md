@@ -4,8 +4,7 @@ Retrieval over FHIR patient records, with recall measured against ground truth
 derived from clinical codes rather than hand-labelled opinion.
 
 The hard part of RAG is not building it — it is knowing whether retrieval
-actually worked. This project aims to answer that with a number you can
-reproduce.
+actually worked. This project answers that with a number you can reproduce.
 
 ## Why FHIR, and why Synthea
 
@@ -15,26 +14,156 @@ LOINC for labs, SNOMED for conditions, CVX for vaccines. So for a question like
 is **derivable** — it is exactly the `MedicationRequest` resources whose RxNorm
 code appears in the diabetes drug set.
 
-That turns `recall@k` into a computed metric instead of a claim.
-[Synthea](https://synthetichealth.github.io/synthea/) provides 111 synthetic
-patient bundles with the same structure as real records and none of the privacy
-problems.
+That makes `recall@k` a computed metric instead of a claim. [Synthea](https://synthetichealth.github.io/synthea/)
+provides 111 synthetic patient bundles with the same structure as real records
+and none of the privacy problems.
 
-Ground-truth rules will match on **codes, never on text**. Matching substrings
-would be circular: the retriever is scored on embeddings of that same text, so a
+Ground-truth rules match on **codes, never on text**. Matching substrings would
+be circular: the retriever is scored on embeddings of that same text, so a
 keyword rule would reward lexical overlap rather than retrieval quality.
 
-## Planned scope
+## Ingestion
 
-- Bundle ingestion that renders coded resources into retrievable sentences
-- Config-selectable embedding backends (NVIDIA NIM, Ollama, OpenAI)
-- A cosine index with per-patient scoping
-- A retrieval benchmark whose ground truth comes from codes, never from text
-- Cost and latency gating via [evalkit](https://github.com/moneya/evalkit)
+A Synthea bundle is ~466 resources with no narrative. Two decisions shape what
+gets indexed:
 
-## Corpus
+**Billing resources are dropped.** `Claim` and `ExplanationOfBenefit` are 88 of
+466 entries in a typical bundle — insurance boilerplate containing no clinical
+fact that isn't already in the resource it points at. Embedding them buries real
+findings.
 
-Not vendored — 28 MB, and reproducible:
+**One chunk per clinical event, not per fixed token window.** A FHIR resource is
+already the natural unit. Splitting a lab result in half yields two useless
+fragments; merging twenty yields a chunk that matches everything.
+
+Resources render as sentences phrased the way a clinician would state them,
+because the question will be phrased that way too:
+
+```
+Alexandra Mosciski was prescribed 24 HR Metformin hydrochloride 500 MG on 2016-03-06.
+Alexandra Mosciski had Hemoglobin A1c/Hemoglobin.total in Blood of 5.85 % measured 2016-12-05.
+Alexandra Mosciski has a diagnosis of Prediabetes (finding), recorded 2015-08-17.
+```
+
+## Embedding backends
+
+Three providers behind one interface, selected by config:
+
+| Backend | Model | Dims | Asymmetric | Key needed |
+|---|---|---|---|---|
+| `nvidia` | `nemotron-3-embed-1b` | 2048 | yes | `NVIDIA_API_KEY` |
+| `ollama` | `nomic-embed-text` | 768 | no | none (local) |
+| `openai` | `text-embedding-3-small` | 1536 | no | `OPENAI_API_KEY` |
+
+The abstraction exists for a concrete reason: **`input_type` is not part of the
+OpenAI embeddings spec.** "OpenAI-compatible" is only half-true for embeddings,
+so a single hardcoded client would either drop the parameter — losing asymmetric
+retrieval — or send it to providers that reject it.
+
+Asymmetric matters because retrieval is a relevance problem, not a similarity
+one. *"Which diabetes medication is the patient taking?"* should match *"was
+prescribed metformin"* — two sentences that are not similar as text. Measured on
+the NVIDIA model, encoding the same string as a query versus a passage gives
+cosine **0.777**, so the distinction is real and not a no-op flag.
+
+## Caching and concurrency
+
+An embedding is a pure function of (model, role, text), so it is computed once
+and cached to JSONL on disk.
+
+Measured on 326 chunks against the free NVIDIA tier:
+
+| | Wall clock | Tokens billed |
+|---|---|---|
+| Sequential, no cache | 118.3 s | 13,860 |
+| 8 concurrent batches | **7.3 s** (16.2x) | 13,860 |
+| Warm cache | **0.125 s** | 0 |
+
+Almost all of the original time was round-trip latency, not compute. The cache
+is what makes iterating on retrieval practical — changing the query set no longer
+costs an API run.
+
+Two correctness details that are easy to get wrong and silent when wrong:
+
+- **Query and passage roles are separate cache keys.** Asymmetric models return
+  different vectors for the same text; sharing one entry would quietly corrupt
+  retrieval while still returning plausible results.
+- **Concurrent batches are reassembled by input position, not completion order.**
+  A test forces the first batch to finish last and asserts the vectors stay
+  aligned. Misalignment doesn't crash — it just makes every number meaningless.
+
+The model itself is not bit-deterministic: embedding identical text twice gives a
+max per-dimension delta of 6e-08 (cosine 1.0000000), i.e. GPU floating-point
+ordering. Cache hits are byte-identical, which is why cached and live runs are
+compared with cosine rather than equality.
+
+## Results
+
+30 patients, 17,472 chunks, 92 (patient, query) pairs with code-derived ground
+truth, NVIDIA `nemotron-3-embed-1b`, k=10:
+
+| Ranking policy | recall@10 | hit@10 | MRR |
+|---|---|---|---|
+| flat top-k | 0.767 | 0.826 | 0.779 |
+| cap 2 per resource type | 0.523 | 0.957 | 0.811 |
+| MMR (λ=0.7) | 0.618 | 0.891 | 0.784 |
+| interleave by type | 0.497 | 0.957 | 0.823 |
+| **shape-aware** | **0.898** | **0.957** | 0.813 |
+
+### Why a global diversification strategy cannot win
+
+The first flat-ranking run had two queries at **0.000 recall**: hypertension and
+prediabetes. Diagnosing it showed the retriever was not wrong — the ground truth
+ranked 28th of 2247 — but a patient carries ~100 near-identical "Blood pressure
+panel" observations scoring 0.426–0.436, and the `Essential hypertension`
+diagnosis they relate to scores 0.295. Restricted to `Condition` resources it is
+rank 1 by a wide margin. Nothing is mis-scored; the signal is buried under
+repetition.
+
+Capping each resource type to 2 fixes exactly that:
+
+| Query | avg relevant chunks | flat | cap 2 |
+|---|---|---|---|
+| prediabetes | 1.0 | 0.000 | **1.000** |
+| hypertension-diagnosis | 1.0 | 0.125 | **0.875** |
+| flu-vaccination | 7.4 | **1.000** | 0.332 |
+| body-weight | 10.0 | **0.885** | 0.433 |
+| diabetes-medication | 19.0 | **0.526** | 0.211 |
+
+The split is perfectly clean: **capping wins when the answer is one chunk and
+loses when the answer is legitimately a list.** Truncating "every influenza
+vaccination" at two rows is not diversification, it is data loss. Interleaving by
+type was tried on the theory that it would avoid the guess — it scored 0.497,
+worse than flat, so the hypothesis was wrong.
+
+So the policy is declared per query rather than chosen globally:
+
+```python
+Query(
+    id="hypertension-diagnosis",
+    question="Does this patient have high blood pressure?",
+    shape="single",   # over-fetch 6x, then cap 2 per resource type
+)
+Query(
+    id="flu-vaccination",
+    question="When was the patient last vaccinated against influenza?",
+    shape="list",     # flat top-k, the answer really is several rows
+)
+```
+
+That reaches 0.898 recall@10 — above every single strategy, because each query
+gets the better of the two. The trade-off is explicit in the data model instead
+of hidden inside an average.
+
+## Install
+
+```bash
+uv venv --python 3.13
+uv pip install -e ".[dev]"
+cp .env.example .env     # add NVIDIA_API_KEY, or run offline with ollama
+```
+
+Fetch the corpus (28 MB, 111 Synthea patients — gitignored, not vendored):
 
 ```bash
 mkdir -p data/raw && cd data/raw
@@ -42,13 +171,65 @@ curl -sLO https://synthetichealth.github.io/synthea-sample-data/downloads/latest
 unzip -q synthea_sample_data_fhir_latest.zip
 ```
 
-## Credentials
+## Usage
 
-```bash
-cp .env.example .env
+Ingestion needs no network or credentials:
+
+```python
+from fhir_rag.ingest import ingest_directory
+
+chunks = ingest_directory("data/raw", limit=30)
+print(len(chunks), "chunks")          # 17472
+print(chunks[0].text)
 ```
 
-`.env` is gitignored. No key is required for the offline Ollama path.
+Index and search:
+
+```python
+from fhir_rag.cache import EmbeddingCache
+from fhir_rag.embeddings import get_embedder
+from fhir_rag.index import VectorIndex
+from fhir_rag.retrieve import retrieve
+
+embedder = get_embedder(
+    "nvidia",                                        # or "ollama" offline
+    cache=EmbeddingCache("nvidia/nemotron-3-embed-1b"),
+    concurrency=8,
+)
+vectors = embedder.embed_passages([c.text for c in chunks])
+
+index = VectorIndex(model=embedder.model, asymmetric=embedder.asymmetric)
+index.add(chunks, vectors.vectors)
+
+hits = retrieve(
+    index,
+    embedder.embed_query("Does this patient have high blood pressure?"),
+    k=10,
+    patient_id=chunks[0].patient_id,
+    shape="single",        # one diagnosis, so diversify; "list" for many rows
+)
+for hit in hits:
+    print(f"{hit.rank}. {hit.score:.3f} {hit.chunk.text}")
+```
+
+Reproduce the benchmark tables:
+
+```bash
+python scripts/bench_diversify.py      # the five ranking policies
+python scripts/diagnose_failures.py    # why a query scored 0.000
+```
+
+Both reuse the on-disk embedding cache, so re-running costs nothing.
+
+## Tests
+
+```bash
+pytest -q
+```
+
+Nothing in the test suite requires an API key: a fake backend encodes each
+input's identity into its vector, so ordering bugs are detectable without
+network access.
 
 ## Licence
 
