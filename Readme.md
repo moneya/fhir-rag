@@ -155,6 +155,56 @@ That reaches 0.898 recall@10 — above every single strategy, because each query
 gets the better of the two. The trade-off is explicit in the data model instead
 of hidden inside an average.
 
+## Reranking
+
+No reranker model is callable on this NVIDIA account — every `nv-rerankqa` id
+returns 404 — so reranking uses a cheap instruct model over the candidates the
+embedding search already found. Groq serves `qwen/qwen3.8-27b` in ~0.5s for as
+few as 2 output tokens, fast enough to sit in the retrieval path.
+
+**The prompt shape was chosen by measurement.** Asking for *"only the passage
+numbers that answer the question"* collapsed a seven-vaccination answer to one
+line — 1/7 recall. Asking the model to **rank all candidates and return the top
+k** kept 7/7 and ordered them correctly. The instruction is therefore always
+"rank", never "filter": how many rows an answer needs is the retriever's job via
+`shape`, not the reranker's.
+
+### What it actually buys
+
+10 patients, shape-aware retrieval with and without reranking, same index and
+same cached query embeddings:
+
+| Metric | shape-aware | + rerank | delta |
+|---|---|---|---|
+| recall@10 | 0.908 | 0.909 | +0.001 |
+| hit@10 | 0.941 | 0.971 | +0.030 |
+| MRR | 0.775 | 0.848 | +0.073 |
+| **precision@1** | **0.706** | **0.824** | **+0.118** |
+| precision@3 | 0.725 | 0.745 | +0.020 |
+
+Recall barely moves, and that is the honest headline: shape-aware retrieval
+already pulls the right chunks into the top ten, so there is little left to
+recover. What reranking fixes is the **order within those ten** — precision@1
+rises 17% relative, which is what a user or a generation step actually consumes.
+Nobody reads to rank 10.
+
+Latency: mean 0.81s, p50 0.61s, max 2.50s over 34 calls. Replies are cached, so
+re-running the benchmark is free.
+
+### Two rules the reranker will not bend
+
+**It never invents or drops candidates.** The output is a permutation of the
+input. Out-of-range ids, duplicates and hallucinated numbers are discarded, and
+any candidate the model omitted is appended in its original embedding order. A
+reranker that silently loses documents is worse than no reranker.
+
+**It fails closed to embedding order.** A timeout, a refusal, a prose answer or
+an unparseable reply returns the input ranking unchanged — never an empty or
+partial list. Verified against the live API: an unreachable host and a real HTTP
+4xx both fall back with all candidates intact. Retrieval degrading to "merely
+unreranked" is acceptable; retrieval returning nothing because an LLM had an off
+day is not.
+
 ## Install
 
 ```bash
@@ -215,8 +265,10 @@ for hit in hits:
 Reproduce the benchmark tables:
 
 ```bash
-python scripts/bench_diversify.py      # the five ranking policies
-python scripts/diagnose_failures.py    # why a query scored 0.000
+python scripts/bench_diversify.py          # the five ranking policies
+python scripts/diagnose_failures.py        # why a query scored 0.000
+python scripts/bench_rerank.py 10          # rerank vs not: recall, hit, MRR
+python scripts/bench_rerank_precision.py 10  # rerank vs not: precision@1/3/5
 ```
 
 Both reuse the on-disk embedding cache, so re-running costs nothing.
