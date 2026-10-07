@@ -304,9 +304,61 @@ macro number hides both:
 - `dense-answer-queries` — flu-vaccination and body-weight, which a global
   resource-type cap would drop from 1.000 to 0.332.
 
+### Two gates, one of which always runs
+
+The 30-patient gate needs an 806 MB index and a live embedding key, so on a fresh
+clone it skips — and a skipped gate under a green badge is worse than no gate. So
+there is a second, committed gate:
+
+```bash
+python scripts/emit_fixture_metrics.py --out data/fixture_metrics.json
+evalkit run evals/fixture_gate.yaml
+```
+
+The index (1.0 MB) and query vectors (106 KB) ship in `tests/fixtures/`, so this
+runs on every push with **no API key, no cache and no download**. Vectors are
+stored int8-quantized as base64 — 160x smaller than JSON floats, and the encoding
+is recorded in the payload so a gate always knows it is reading quantized data.
+
+The fixture patient was chosen by measurement, not convenience: it is the
+smallest of 30 that retains **both** pathology queries, with 154 Observations
+against 25 Conditions so "measurements drown diagnoses" is still reproducible.
+
+It deliberately does **not** reproduce the 30-patient headline numbers — one
+patient gives 5 (patient, query) pairs instead of 92, so the averages differ.
+Claiming otherwise would be dishonest. Its job is narrower: catch a ranking-policy
+regression, which it does because the fixture separates the candidate policies by
+a wide margin:
+
+| Policy | recall@10 on fixture |
+|---|---|
+| shape-aware | **1.000** |
+| flat top-k | 0.800 — prediabetes collapses to 0.000 |
+| global cap 2 | 0.760 — flu-vaccination and body-weight fall to 0.400 |
+
+Note that MRR is 0.700 and precision@1 is 0.600 even here: all the right chunks
+are retrieved, but a measurement still out-ranks a diagnosis at position 1. The
+gate is pinned at those measured values rather than rounded up, because that is
+the documented model limitation, not a bug to hide.
+
 ### Verified to fail, not just to pass
 
-A gate that only ever passes is decorative. With a regression injected into the
+A gate that only ever passes is decorative. The fixture gate was tested by
+breaking the **real code path** — injecting the pre-shape-aware policy into
+`retrieve.py` — not by editing a metrics file:
+
+```
+FAIL  sparse-answer-queries
+      json_path: per_query.prediabetes=0, want >= 1
+FAIL  macro-retrieval
+      json_path: retrieval.recall@10=0.8, want >= 1
+FAIL  ranking-quality
+      json_path: retrieval.mrr=0.6333, want >= 0.7
+
+cases 2/5 passed   exit code 1
+```
+
+The 30-patient gate was checked the same way, with a regression injected into the
 metrics file:
 
 ```
